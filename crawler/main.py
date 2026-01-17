@@ -15,11 +15,14 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 BUCKET = os.getenv("SUPABASE_BUCKET", "market-csv")
 
-# Executar de 30 em 30 minutos
+# Executar periodicamente (default 60s)
 INTERVAL_SECONDS = int(os.getenv("CRAWLER_INTERVAL_SECONDS", "60"))
 
 # Manter apenas os últimos 5 CSVs no bucket
 MAX_FILES = int(os.getenv("CRAWLER_MAX_FILES", "5"))
+
+# Pasta local para guardar CSVs gerados
+EXPORT_DIR = os.path.join(os.path.dirname(__file__), "exports")
 
 
 def scrape_population_table() -> pd.DataFrame:
@@ -40,15 +43,18 @@ def scrape_population_table() -> pd.DataFrame:
 
     df = target.copy()
 
+    # Renomear colunas
     df = df.rename(columns={
         "Location": "country",
         "Population": "population",
         "% of world": "world_pct",
-        "Date": "date"
+        "Date": "date"  # pode existir na tabela, mas vamos remover depois
     })
 
-    df = df[["country", "population", "world_pct", "date"]]
+    # Queremos só estas 3 colunas (SEM date)
+    df = df[["country", "population", "world_pct"]]
 
+    # Limpar country
     df["country"] = (
         df["country"]
         .astype(str)
@@ -57,6 +63,7 @@ def scrape_population_table() -> pd.DataFrame:
         .str.strip()
     )
 
+    # Limpar population
     df["population"] = (
         df["population"]
         .astype(str)
@@ -65,6 +72,7 @@ def scrape_population_table() -> pd.DataFrame:
     )
     df["population"] = pd.to_numeric(df["population"], errors="coerce").astype("Int64")
 
+    # Limpar world_pct
     df["world_pct"] = (
         df["world_pct"]
         .astype(str)
@@ -73,8 +81,7 @@ def scrape_population_table() -> pd.DataFrame:
     )
     df["world_pct"] = pd.to_numeric(df["world_pct"], errors="coerce")
 
-    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-
+    # Remover linhas inválidas
     df = df.dropna(subset=["country", "population"]).reset_index(drop=True)
 
     return df
@@ -98,7 +105,6 @@ def upload_to_supabase(csv_bytes: bytes, filename: str):
 def cleanup_old_files():
     supabase = get_supabase_client()
 
-    # Lista ficheiros no bucket (raiz)
     files = supabase.storage.from_(BUCKET).list(path="")
 
     csv_files = [
@@ -107,7 +113,6 @@ def cleanup_old_files():
         and f.get("name", "").startswith("countries_population_")
     ]
 
-    # Ordena pelo timestamp no nome (YYYYMMDD_HHMMSS)
     csv_files.sort(key=lambda x: x["name"])
 
     print("Ficheiros CSV no bucket:", [f["name"] for f in csv_files])
@@ -121,33 +126,40 @@ def cleanup_old_files():
 
     print("Vai apagar (FIFO):", to_delete_names)
 
-    # remove espera uma lista de paths
     res = supabase.storage.from_(BUCKET).remove(to_delete_names)
     print("Resultado remove():", res)
 
-    # Confirmacao (lista outra vez)
     files_after = supabase.storage.from_(BUCKET).list(path="")
     names_after = [f.get("name", "") for f in files_after]
     print("Ficheiros depois:", names_after)
 
 
-
 def run_once():
     df = scrape_population_table()
 
+    # Multiplicar por 5 (mais volume)
     df = pd.concat([df] * 5, ignore_index=True)
 
     filename = f"countries_population_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
     csv_bytes = df.to_csv(index=False).encode("utf-8")
 
-    with open(filename, "wb") as f:
+    # Garantir pasta exports existe
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+
+    # Guardar localmente dentro de crawler/exports/
+    local_path = os.path.join(EXPORT_DIR, filename)
+    with open(local_path, "wb") as f:
         f.write(csv_bytes)
 
+    # Upload para Supabase
     upload_to_supabase(csv_bytes, filename)
+
+    # FIFO no bucket
     cleanup_old_files()
 
     print("CSV enviado:", filename)
     print("Total de linhas:", len(df))
+    print("Guardado localmente em:", local_path)
 
 
 def main():
