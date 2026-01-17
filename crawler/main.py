@@ -15,8 +15,8 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 BUCKET = os.getenv("SUPABASE_BUCKET", "market-csv")
 
-# Executar periodicamente (default 60s)
-INTERVAL_SECONDS = int(os.getenv("CRAWLER_INTERVAL_SECONDS", "60"))
+# Executar periodicamente (1800s)
+INTERVAL_SECONDS = int(os.getenv("CRAWLER_INTERVAL_SECONDS", "1800"))
 
 # Manter apenas os últimos 5 CSVs no bucket
 MAX_FILES = int(os.getenv("CRAWLER_MAX_FILES", "5"))

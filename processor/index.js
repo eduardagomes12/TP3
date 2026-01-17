@@ -6,6 +6,7 @@ import { parse } from "csv-parse";
 import { Readable } from "stream";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 
 // ---------------- CONFIG ----------------
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -14,7 +15,19 @@ const BUCKET = process.env.SUPABASE_BUCKET || "market-csv";
 
 const INTERVAL_SECONDS = Number(process.env.PROCESSOR_INTERVAL_SECONDS || 60);
 const WEBHOOK_PORT = Number(process.env.WEBHOOK_PORT || 7070);
-// ---------------------------------------
+
+// URL "publica" que o XML Service vai chamar (pode ser ngrok, localhost em demo, etc.)
+const WEBHOOK_PUBLIC_URL =
+  process.env.WEBHOOK_PUBLIC_URL || `http://localhost:${WEBHOOK_PORT}`;
+
+// Endpoint do XML Service para receber o multipart/form-data
+const XML_SERVICE_URL = process.env.XML_SERVICE_URL || ""; // ex: http://localhost:8080/xml
+
+// tempo maximo para esperar callback do XML Service
+const WEBHOOK_WAIT_SECONDS = Number(process.env.WEBHOOK_WAIT_SECONDS || 60);
+
+// mapper version
+const MAPPER_VERSION = process.env.MAPPER_VERSION || "v1";
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
   throw new Error("Faltam SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY no .env");
@@ -47,7 +60,7 @@ if (!fs.existsSync(ERRORS_DIR)) fs.mkdirSync(ERRORS_DIR, { recursive: true });
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
 if (!fs.existsSync(ERRORS_FILE)) {
-  fs.writeFileSync(ERRORS_FILE, "timestamp,source_file,country,error\n", "utf8");
+  fs.writeFileSync(ERRORS_FILE, "timestamp,source_file,request_id,country,error\n", "utf8");
 }
 
 function csvEscape(value) {
@@ -55,10 +68,11 @@ function csvEscape(value) {
   return `"${s.replace(/"/g, '""')}"`;
 }
 
-function logError(sourceFile, country, errorMsg) {
+function logError(sourceFile, requestId, country, errorMsg) {
   const line =
     `${csvEscape(new Date().toISOString())},` +
     `${csvEscape(sourceFile)},` +
+    `${csvEscape(requestId)},` +
     `${csvEscape(country)},` +
     `${csvEscape(errorMsg)}\n`;
   fs.appendFileSync(ERRORS_FILE, line, "utf8");
@@ -78,11 +92,52 @@ function tsCompact() {
   );
 }
 
-// ---------------- WEBHOOK ----------------
+function getErrorReason(err) {
+  const status = err?.response?.status;
+  const url = err?.config?.url;
+  const code = err?.code;
+  const msg = err?.message;
+
+  if (status) return `HTTP ${status}${url ? ` (${url})` : ""}`;
+  if (code) return `${code}${url ? ` (${url})` : ""}`;
+  return msg || "Erro desconhecido";
+}
+// ----------------------------------------
+
+// ---------------- WEBHOOK (ACK do XML Service) ----------------
+// Vamos guardar o estado por requestId: { ok: true/false, receivedAt, payload }
+const webhookAcks = new Map();
+
 app.post("/webhook/xml-service", (req, res) => {
-  console.log("Webhook recebido do XML Service:", req.body);
+  // Esperado algo tipo: { requestId: "...", ok: true, message: "...", xmlSaved: true }
+  const body = req.body || {};
+  const requestId = body.requestId || body.request_id;
+
+  if (requestId) {
+    webhookAcks.set(requestId, {
+      ok: Boolean(body.ok ?? body.success ?? body.xmlSaved ?? true),
+      receivedAt: new Date().toISOString(),
+      payload: body,
+    });
+    console.log("Webhook recebido do XML Service:", body);
+  } else {
+    console.log("Webhook recebido (sem requestId):", body);
+  }
+
   res.status(200).json({ ok: true });
 });
+
+async function waitForWebhookAck(requestId, timeoutSeconds) {
+  const deadline = Date.now() + timeoutSeconds * 1000;
+
+  while (Date.now() < deadline) {
+    const ack = webhookAcks.get(requestId);
+    if (ack) return ack;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  return null;
+}
 // ----------------------------------------
 
 // ---------------- HELPERS ----------------
@@ -94,35 +149,27 @@ async function listCsvFiles() {
   const { data, error } = await supabase.storage.from(BUCKET).list("", {
     limit: 100,
     offset: 0,
-    sortBy: { column: "name", order: "asc" },
+    sortBy: { column: "name", order: "asc" }, // FIFO
   });
 
   if (error) throw error;
 
   return (data || [])
     .map((f) => f.name)
-    .filter(
-      (name) => name.endsWith(".csv") && name.startsWith("countries_population_")
-    )
+    .filter((name) => name.endsWith(".csv") && name.startsWith("countries_population_"))
     .sort();
 }
 
 async function downloadCsvStream(filename) {
   const { data, error } = await supabase.storage.from(BUCKET).download(filename);
   if (error) throw error;
-
   return Readable.fromWeb(data.stream());
 }
 
-function getErrorReason(err) {
-  const status = err?.response?.status;
-  const url = err?.config?.url;
-  const code = err?.code;
-  const msg = err?.message;
-
-  if (status) return `HTTP ${status}${url ? ` (${url})` : ""}`;
-  if (code) return `${code}${url ? ` (${url})` : ""}`;
-  return msg || "Erro desconhecido";
+async function deleteCsvFromBucket(filename) {
+  const { data, error } = await supabase.storage.from(BUCKET).remove([filename]);
+  if (error) throw error;
+  return data;
 }
 // ----------------------------------------
 
@@ -137,9 +184,7 @@ async function enrichWithApis(record) {
     let response;
     try {
       response = await axios.get(
-        `https://restcountries.com/v3.1/name/${encodeURIComponent(
-          countryName
-        )}?fullText=true`,
+        `https://restcountries.com/v3.1/name/${encodeURIComponent(countryName)}?fullText=true`,
         AXIOS_CONFIG
       );
     } catch {
@@ -148,9 +193,9 @@ async function enrichWithApis(record) {
         AXIOS_CONFIG
       );
     }
-
     countryData = Array.isArray(response.data) ? response.data[0] : null;
   } catch (err) {
+    // Se falhar REST Countries, nao temos ISO/currency, entao e falha "hard"
     throw new Error(`REST Countries falhou: ${getErrorReason(err)}`);
   }
 
@@ -159,13 +204,14 @@ async function enrichWithApis(record) {
   const iso2 = countryData.cca2 ?? null;
   const iso3 = countryData.cca3 ?? null;
 
-  const currencyCode = countryData.currencies
-    ? Object.keys(countryData.currencies)[0]
-    : null;
+  const currencyCode = countryData.currencies ? Object.keys(countryData.currencies)[0] : null;
 
-  // API 2: World Bank (usar ISO3)
+  // API 2: World Bank (ISO3)
+  // Aqui nao queremos rebentar tudo se o WB falhar (ECONNABORTED / rate limit / etc)
+  // Entao: se falhar -> gdp fica null e registamos erro fora (no caller)
   let gdpUsd = null;
   let gdpYear = null;
+  let worldBankError = null;
 
   if (iso3) {
     try {
@@ -183,8 +229,7 @@ async function enrichWithApis(record) {
         }
       }
     } catch (err) {
-      // não rebenta: só fica null, mas vamos registar erro
-      throw new Error(`World Bank falhou: ${getErrorReason(err)}`);
+      worldBankError = `World Bank falhou: ${getErrorReason(err)}`;
     }
   }
 
@@ -197,9 +242,44 @@ async function enrichWithApis(record) {
     currencyCode,
     gdpUsd,
     gdpYear,
-    mapper_version: "v1",
+    mapper_version: MAPPER_VERSION,
     enriched_at: new Date().toISOString(),
+    worldBankError, // opcional (para o caller decidir se loga)
   };
+}
+// ------------------------------------------
+
+// ---------------- XML SERVICE SEND ----------------
+async function sendToXmlService({ requestId, mapperVersion, webhookUrl, csvPath }) {
+  if (!XML_SERVICE_URL) {
+    console.log("XML_SERVICE_URL nao definido. A saltar envio para XML Service.");
+    return { skipped: true };
+  }
+
+  // Node 18+ tem fetch + FormData + Blob globalmente
+  const fileBytes = fs.readFileSync(csvPath);
+  const form = new FormData();
+
+  form.append("requestId", requestId);
+  form.append("mapper_version", mapperVersion);
+  form.append("webhookUrl", webhookUrl);
+
+  // Nome do ficheiro no multipart
+  const filename = path.basename(csvPath);
+  form.append("file", new Blob([fileBytes], { type: "text/csv" }), filename);
+
+  const res = await fetch(XML_SERVICE_URL, {
+    method: "POST",
+    body: form,
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`XML Service respondeu ${res.status}: ${text || "sem body"}`);
+  }
+
+  const json = await res.json().catch(() => ({}));
+  return json;
 }
 // ------------------------------------------
 
@@ -213,8 +293,12 @@ async function runOnce() {
     return;
   }
 
+  // FIFO: o mais antigo
   const target = files[0];
+  const requestId = crypto.randomUUID();
+
   console.log("Processor: a processar (FIFO):", target);
+  console.log("Processor: requestId:", requestId);
 
   const csvStream = await downloadCsvStream(target);
 
@@ -225,6 +309,7 @@ async function runOnce() {
     })
   );
 
+  // output csv enriched
   const outName = `enriched_${tsCompact()}_${target}`;
   const outPath = path.join(OUTPUT_DIR, outName);
 
@@ -237,13 +322,25 @@ async function runOnce() {
   let failCount = 0;
 
   for await (const record of parser) {
+    const rawCountry = record.country;
+
     try {
       const enriched = await enrichWithApis(record);
 
       if (!enriched) {
         failCount++;
-        logError(target, record.country, "Falha no enrichment (sem match / country inválido)");
+        logError(
+          target,
+          requestId,
+          rawCountry,
+          "Falha no enrichment (sem match / country invalido)"
+        );
         continue;
+      }
+
+      // Se World Bank falhou, registamos o erro, mas mantemos a linha com gdp null
+      if (enriched.worldBankError) {
+        logError(target, requestId, rawCountry, enriched.worldBankError);
       }
 
       okCount++;
@@ -267,21 +364,57 @@ async function runOnce() {
       }
     } catch (err) {
       failCount++;
-      logError(target, record.country, err.message || "Erro inesperado");
+      logError(target, requestId, rawCountry, err.message || "Erro inesperado");
     }
   }
 
   out.end();
 
-  console.log(
-    `Processor: enrichment concluido (${okCount} ok, ${failCount} falhas).`
-  );
+  console.log(`Processor: enrichment concluido (${okCount} ok, ${failCount} falhas).`);
   console.log(`Processor: CSV enriched guardado em: ${outPath}`);
 
-  // Aqui depois entra o XML Service:
-  // - enviar outPath (ou stream) para XML Service
-  // - esperar callback no webhook
-  // - apagar CSVs
+  // 1) enviar para XML Service (multipart) com metadata (requestId, mapper, webhookUrl)
+  const webhookUrl = `${WEBHOOK_PUBLIC_URL}/webhook/xml-service`;
+
+  console.log("Processor: a enviar para XML Service...");
+  const sendRes = await sendToXmlService({
+    requestId,
+    mapperVersion: MAPPER_VERSION,
+    webhookUrl,
+    csvPath: outPath,
+  });
+
+  if (sendRes?.skipped) {
+    console.log("Processor: envio para XML Service ignorado (sem XML_SERVICE_URL).");
+    console.log("Processor: nao vou apagar o CSV do bucket (para nao perder dados).");
+    return;
+  }
+
+  console.log("Processor: enviado. A aguardar confirmacao no webhook...");
+
+  // 2) esperar callback do XML Service
+  const ack = await waitForWebhookAck(requestId, WEBHOOK_WAIT_SECONDS);
+
+  if (!ack) {
+    console.log(
+      `Processor: timeout a esperar webhook (${WEBHOOK_WAIT_SECONDS}s). Nao vou apagar o CSV do bucket.`
+    );
+    return;
+  }
+
+  if (!ack.ok) {
+    console.log("Processor: webhook recebido mas com ok=false. Nao vou apagar CSV do bucket.");
+    return;
+  }
+
+  console.log("Processor: webhook ok. A apagar CSV original do bucket...");
+
+  // 3) apagar CSV original do bucket quando OK
+  await deleteCsvFromBucket(target);
+  console.log("Processor: CSV apagado do bucket:", target);
+
+  // opcional: podias tambem apagar o enriched local se quiseres
+  // fs.unlinkSync(outPath);
 }
 // ------------------------------------------
 
@@ -303,9 +436,7 @@ async function mainLoop() {
 
 // ---------------- START ----------------
 app.listen(WEBHOOK_PORT, () => {
-  console.log(
-    `Webhook server ativo em http://localhost:${WEBHOOK_PORT}/webhook/xml-service`
-  );
+  console.log(`Webhook server ativo em ${WEBHOOK_PUBLIC_URL}/webhook/xml-service`);
 });
 
 mainLoop();
