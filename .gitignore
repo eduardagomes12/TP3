@@ -1,20 +1,23 @@
-.venv/
-__pycache__/
-*.csv
-
-
-# Node
-node_modules/
-
-# Env files
+# env
 .env
-.env.*
+**/.env
 
-# Logs
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# node
+node_modules/
 npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
 
-# OS / editor
+# outputs
+crawler/exports/
+processor/output/
+processor/errors/
+output/
+errors/
+
+# OS
 .DS_Store
-.vscode/

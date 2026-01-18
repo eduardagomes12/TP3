@@ -1,0 +1,8 @@
+services:
+  xml-service:
+    build: .
+    container_name: tp3_xml_service
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"

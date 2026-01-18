@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified">
+
+  <xs:element name="PopulationReport">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="Country" minOccurs="1" maxOccurs="unbounded">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="Name" type="xs:string"/>
+              <xs:element name="ISO2" type="xs:string" minOccurs="0"/>
+              <xs:element name="ISO3" type="xs:string" minOccurs="0"/>
+
+              <xs:element name="PopulationTotal" type="xs:long" minOccurs="0"/>
+              <xs:element name="WorldPct" type="xs:decimal" minOccurs="0"/>
+
+              <xs:element name="Economy" minOccurs="0">
+                <xs:complexType>
+                  <xs:sequence>
+                    <xs:element name="Currency" type="xs:string" minOccurs="0"/>
+                    <xs:element name="GDP" minOccurs="0">
+                      <xs:complexType>
+                        <xs:simpleContent>
+                          <xs:extension base="xs:decimal">
+                            <xs:attribute name="year" type="xs:int" use="optional"/>
+                          </xs:extension>
+                        </xs:simpleContent>
+                      </xs:complexType>
+                    </xs:element>
+                  </xs:sequence>
+                </xs:complexType>
+              </xs:element>
+
+            </xs:sequence>
+            <xs:attribute name="internalId" type="xs:string" use="optional"/>
+          </xs:complexType>
+        </xs:element>
+      </xs:sequence>
+
+      <xs:attribute name="mapperVersion" type="xs:string" use="required"/>
+      <xs:attribute name="createdAt" type="xs:dateTime" use="required"/>
+    </xs:complexType>
+  </xs:element>
+
+</xs:schema>

@@ -14,7 +14,7 @@ const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const BUCKET = process.env.SUPABASE_BUCKET || "market-csv";
 
 const INTERVAL_SECONDS = Number(process.env.PROCESSOR_INTERVAL_SECONDS || 60);
-const WEBHOOK_PORT = Number(process.env.WEBHOOK_PORT || 7070);
+const WEBHOOK_PORT = Number(process.env.PORT || process.env.WEBHOOK_PORT || 7070);
 
 // URL "publica" que o XML Service vai chamar (pode ser ngrok, localhost em demo, etc.)
 const WEBHOOK_PUBLIC_URL =
@@ -51,8 +51,8 @@ const AXIOS_CONFIG = {
 // ---------------- FOLDERS ----------------
 const PROJECT_ROOT = process.cwd();
 
-const ERRORS_DIR = path.join(PROJECT_ROOT, "processor", "errors");
-const OUTPUT_DIR = path.join(PROJECT_ROOT, "processor", "output");
+const ERRORS_DIR = path.join(PROJECT_ROOT, "errors");
+const OUTPUT_DIR = path.join(PROJECT_ROOT, "output");
 
 const ERRORS_FILE = path.join(ERRORS_DIR, "processing_errors.csv");
 
@@ -435,7 +435,7 @@ async function mainLoop() {
 // ------------------------------------------
 
 // ---------------- START ----------------
-app.listen(WEBHOOK_PORT, () => {
+app.listen(WEBHOOK_PORT, "0.0.0.0", () => {
   console.log(`Webhook server ativo em ${WEBHOOK_PUBLIC_URL}/webhook/xml-service`);
 });
 
