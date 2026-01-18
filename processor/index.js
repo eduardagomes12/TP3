@@ -368,7 +368,8 @@ async function runOnce() {
     }
   }
 
-  out.end();
+  await new Promise((resolve) => out.end(resolve));
+
 
   console.log(`Processor: enrichment concluido (${okCount} ok, ${failCount} falhas).`);
   console.log(`Processor: CSV enriched guardado em: ${outPath}`);
@@ -413,8 +414,14 @@ async function runOnce() {
   await deleteCsvFromBucket(target);
   console.log("Processor: CSV apagado do bucket:", target);
 
-  // opcional: podias tambem apagar o enriched local se quiseres
-  // fs.unlinkSync(outPath);
+  //  apagar o enriched local 
+  try {
+    fs.unlinkSync(outPath);
+    console.log("Processor: CSV enriched apagado localmente:", outPath);
+  } catch (e) {
+    console.log("Processor: nao consegui apagar enriched (ignorado):", e?.message || e);
+  }
+
 }
 // ------------------------------------------
 

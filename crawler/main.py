@@ -170,7 +170,7 @@ def main():
         except Exception as e:
             print("Erro no crawler:", str(e))
 
-        print(f"A aguardar {INTERVAL_SECONDS} segundos ({INTERVAL_SECONDS // 60} minutos)...\n")
+        print(f"A aguardar {INTERVAL_SECONDS} segundos ({INTERVAL_SECONDS // 60} minuto)...\n")
         time.sleep(INTERVAL_SECONDS)
 
 
