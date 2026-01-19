@@ -2,6 +2,7 @@ import os
 import psycopg2
 
 
+# ---------- DB CONFIG ----------
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
 DB_NAME = os.getenv("DB_NAME", "postgres")
@@ -22,11 +23,16 @@ def get_conn():
 
 
 def _doc_xml_expr(alias="d"):
+    """
+    Garante que o documento é tratado como XML,
+    mesmo que esteja armazenado como TEXT.
+    """
     return f"CAST({alias}.xml_documento AS xml)"
 
 
-
-
+# =========================================================
+# TOP GDP (deduplicado por país)
+# =========================================================
 def top_gdp(document_id: int, year: str | None, limit: int = 10):
     year = (year or "").strip()
     limit = int(limit or 10)
@@ -34,7 +40,7 @@ def top_gdp(document_id: int, year: str | None, limit: int = 10):
         limit = 10
 
     sql = f"""
-    SELECT
+    SELECT DISTINCT ON (x.name)
       x.name,
       x.iso2,
       x.iso3,
@@ -54,7 +60,7 @@ def top_gdp(document_id: int, year: str | None, limit: int = 10):
     WHERE d.id = %s
       AND (%s = '' OR x.gdp_year = %s)
       AND x.gdp_value IS NOT NULL
-    ORDER BY x.gdp_value DESC
+    ORDER BY x.name, x.gdp_value DESC
     LIMIT %s;
     """
 
@@ -75,6 +81,9 @@ def top_gdp(document_id: int, year: str | None, limit: int = 10):
     ]
 
 
+# =========================================================
+# DISTRIBUIÇÃO POR MOEDA
+# =========================================================
 def countries_by_currency(document_id: int, limit: int = 10):
     limit = int(limit or 10)
     if limit <= 0:
@@ -107,14 +116,23 @@ def countries_by_currency(document_id: int, limit: int = 10):
     return [{"currency": r[0], "count": int(r[1])} for r in rows]
 
 
-def population_filter(document_id: int, min_population: int, max_population: int, limit: int = 20):
+# =========================================================
+# FILTRO DE POPULAÇÃO (INTERVALO)
+# =========================================================
+def population_filter(
+    document_id: int,
+    min_population: int,
+    max_population: int,
+    limit: int = 20,
+):
     min_population = int(min_population or 0)
     max_population = int(max_population or 0)
     limit = int(limit or 20)
     if limit <= 0:
         limit = 20
 
-    if max_population < min_population:
+    # garante intervalo válido
+    if max_population and max_population < min_population:
         min_population, max_population = max_population, min_population
 
     sql = f"""
@@ -133,23 +151,27 @@ def population_filter(document_id: int, min_population: int, max_population: int
     ) AS x
     WHERE d.id = %s
       AND x.population_total IS NOT NULL
-      AND x.population_total BETWEEN %s AND %s
+      AND (
+        %s = 0
+        OR x.population_total BETWEEN %s AND %s
+      )
     ORDER BY COALESCE(x.world_pct, 0) DESC
     LIMIT %s;
     """
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (document_id, min_population, max_population, limit))
+            cur.execute(
+                sql,
+                (document_id, max_population, min_population, max_population, limit),
+            )
             rows = cur.fetchall()
 
-    out = []
-    for r in rows:
-        out.append(
-            {
-                "name": r[0] or "",
-                "population": int(r[1]) if r[1] is not None else 0,
-                "worldPct": float(r[2]) if r[2] is not None else 0.0,
-            }
-        )
-    return out
+    return [
+        {
+            "name": r[0] or "",
+            "population": int(r[1]) if r[1] is not None else 0,
+            "worldPct": float(r[2]) if r[2] is not None else 0.0,
+        }
+        for r in rows
+    ]
