@@ -1,74 +1,111 @@
-import os
 from fastapi import FastAPI, HTTPException, Query
-from app.grpc_client import get_stub
-from app import xml_service_pb2
-import grpc
+from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+
+from app.grpc_client import (
+    countries_by_currency,
+    top_gdp,
+    population_filter,
+)
+
+load_dotenv()
 
 app = FastAPI(title="TP3 BI Service", version="1.0")
+
+# -------------------- CORS --------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5500",
+        "http://127.0.0.1:5500",
+        "http://localhost",
+        "http://127.0.0.1",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# ---------------------------------------------
+
 
 @app.get("/health")
 def health():
     return {"ok": True}
 
-@app.get("/bi/{document_id}/currency-stats")
-def currency_stats(document_id: int, limit: int = Query(10, ge=1, le=200)):
+
+# ---------- BI: Currency Stats ----------
+@app.get("/bi/currency-stats")
+def bi_currency_stats(
+    documentId: int = Query(..., ge=1),
+    limit: int = Query(10, ge=1, le=200),
+):
     try:
-        stub = get_stub()
-        req = xml_service_pb2.CurrencyStatsRequest(documentId=document_id, limit=limit)
-        res = stub.CountriesByCurrency(req)
-
+        res = countries_by_currency(documentId, limit)
         return {
-            "documentId": document_id,
-            "items": [{"currency": i.currency, "count": i.count} for i in res.items],
+            "documentId": documentId,
+            "items": [
+                {"currency": i.currency, "count": i.count}
+                for i in res.items
+            ],
         }
-    except grpc.RpcError as e:
-        raise HTTPException(status_code=500, detail=e.details() or "Erro gRPC")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/bi/{document_id}/top-gdp")
-def top_gdp(
-    document_id: int,
+
+# ---------- BI: Top GDP ----------
+@app.get("/bi/top-gdp")
+def bi_top_gdp(
+    documentId: int = Query(..., ge=1),
     year: str = Query("", max_length=10),
     limit: int = Query(10, ge=1, le=200),
 ):
     try:
-        stub = get_stub()
-        req = xml_service_pb2.TopGdpRequest(documentId=document_id, year=year, limit=limit)
-        res = stub.TopGdp(req)
-
+        res = top_gdp(documentId, year, limit)
         return {
-            "documentId": document_id,
+            "documentId": documentId,
             "year": year,
             "items": [
-                {"name": i.name, "iso2": i.iso2, "iso3": i.iso3, "year": i.year, "gdp": i.gdp}
+                {
+                    "name": i.name,
+                    "iso2": i.iso2,
+                    "iso3": i.iso3,
+                    "year": i.year,
+                    "gdp": i.gdp,
+                }
                 for i in res.items
             ],
         }
-    except grpc.RpcError as e:
-        raise HTTPException(status_code=500, detail=e.details() or "Erro gRPC")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/bi/{document_id}/population-filter")
-def population_filter(
-    document_id: int,
-    min_population: int = Query(0, ge=0),
-    max_population: int = Query(2_000_000_000, ge=0),
-    limit: int = Query(20, ge=1, le=200),
+
+# ---------- BI: Population Filter ----------
+@app.get("/bi/population-filter")
+def bi_population_filter(
+    documentId: int = Query(..., ge=1),
+    minPopulation: int = Query(0, ge=0),
+    maxPopulation: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=500),
 ):
     try:
-        stub = get_stub()
-        req = xml_service_pb2.PopulationFilterRequest(
-            documentId=document_id,
-            minPopulation=min_population,
-            maxPopulation=max_population,
-            limit=limit,
+        res = population_filter(
+            documentId,
+            minPopulation,
+            maxPopulation,
+            limit,
         )
-        res = stub.PopulationFilter(req)
-
         return {
-            "documentId": document_id,
+            "documentId": documentId,
+            "minPopulation": minPopulation,
+            "maxPopulation": maxPopulation,
             "items": [
-                {"name": i.name, "population": i.population, "worldPct": i.worldPct}
+                {
+                    "name": i.name,
+                    "population": i.population,
+                    "worldPct": i.worldPct,
+                }
                 for i in res.items
             ],
         }
-    except grpc.RpcError as e:
-        raise HTTPException(status_code=500, detail=e.details() or "Erro gRPC")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
