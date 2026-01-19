@@ -16,10 +16,9 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 BUCKET = os.getenv("SUPABASE_BUCKET", "market-csv")
 
 # Executar periodicamente (1800s)
-INTERVAL_SECONDS = int(os.getenv("CRAWLER_INTERVAL_SECONDS", "1800"))
+INTERVAL_SECONDS = int(os.getenv("CRAWLER_INTERVAL_SECONDS", "60"))
 
-# Manter apenas os últimos 5 CSVs no bucket
-MAX_FILES = int(os.getenv("CRAWLER_MAX_FILES", "5"))
+
 
 # Pasta local para guardar CSVs gerados
 EXPORT_DIR = os.path.join(os.path.dirname(__file__), "exports", "incoming")
@@ -97,46 +96,14 @@ def get_supabase_client():
 def upload_to_supabase(csv_bytes: bytes, filename: str):
     supabase = get_supabase_client()
     supabase.storage.from_(BUCKET).upload(
-        filename,
-        csv_bytes,
-        {"content-type": "text/csv"}
+        path=filename,
+        file=csv_bytes,
+        file_options={"content-type": "text/csv", "upsert": True}
     )
 
 
-def cleanup_old_files():
-    supabase = get_supabase_client()
-
-    files = supabase.storage.from_(BUCKET).list(path="incoming")
 
 
-    csv_files = [
-        f for f in files
-        if f.get("name", "").endswith(".csv")
-        and f.get("name", "").startswith("countries_population_")
-    ]
-
-    csv_files.sort(key=lambda x: x["name"])
-
-    print("Ficheiros CSV no bucket:", [f"incoming/{f['name']}" for f in csv_files])
-
-
-    if len(csv_files) <= MAX_FILES:
-        print(f"Nao ha nada para apagar (tem {len(csv_files)} <= {MAX_FILES}).")
-        return
-
-    to_delete = csv_files[:-MAX_FILES]
-    to_delete_names = [f"incoming/{f['name']}" for f in to_delete]
-
-
-    print("Vai apagar (FIFO):", to_delete_names)
-
-    res = supabase.storage.from_(BUCKET).remove(to_delete_names)
-    print("Resultado remove():", res)
-
-    files_after = supabase.storage.from_(BUCKET).list(path="incoming")
-    names_after = [f"incoming/{f.get('name','')}" for f in files_after]
-
-    print("Ficheiros depois:", names_after)
 
 
 def run_once():
@@ -160,8 +127,7 @@ def run_once():
     bucket_path = f"incoming/{filename}"
     upload_to_supabase(csv_bytes, bucket_path)
 
-    # FIFO no bucket
-    cleanup_old_files()
+  
 
     print("CSV enviado:", bucket_path)
 
