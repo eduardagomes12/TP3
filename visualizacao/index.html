@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="pt">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TP3 — BI Dashboard</title>
+
+    <!-- Chart.js (CDN) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+      :root {
+        --bg: #0b0f19;
+        --card: #111827;
+        --muted: #94a3b8;
+        --text: #e5e7eb;
+        --border: rgba(255,255,255,.08);
+        --accent: #7c3aed;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+        background: radial-gradient(1200px 600px at 20% 0%, rgba(124,58,237,.25), transparent 60%),
+                    radial-gradient(1000px 500px at 90% 10%, rgba(59,130,246,.18), transparent 60%),
+                    var(--bg);
+        color: var(--text);
+      }
+      header {
+        padding: 28px 18px 10px;
+        max-width: 1100px;
+        margin: 0 auto;
+      }
+      h1 {
+        margin: 0;
+        font-size: 28px;
+        letter-spacing: .2px;
+      }
+      p.sub {
+        margin: 8px 0 0;
+        color: var(--muted);
+        line-height: 1.4;
+      }
+      .toolbar {
+        max-width: 1100px;
+        margin: 14px auto 0;
+        padding: 0 18px;
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .input, .btn, select {
+        background: rgba(255,255,255,.04);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 10px 12px;
+        border-radius: 12px;
+        outline: none;
+      }
+      .input { width: 150px; }
+      .btn {
+        cursor: pointer;
+        transition: transform .08s ease, background .2s ease;
+      }
+      .btn:hover { background: rgba(255,255,255,.07); }
+      .btn:active { transform: translateY(1px); }
+      .btn.primary {
+        background: rgba(124,58,237,.22);
+        border-color: rgba(124,58,237,.35);
+      }
+      .status {
+        color: var(--muted);
+        font-size: 14px;
+        margin-left: auto;
+      }
+
+      main {
+        max-width: 1100px;
+        margin: 18px auto 50px;
+        padding: 0 18px;
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 14px;
+      }
+      @media (min-width: 900px) {
+        main { grid-template-columns: 1fr 1fr; }
+        .span2 { grid-column: span 2; }
+      }
+      .card {
+        background: rgba(17,24,39,.82);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 14px 14px 10px;
+        backdrop-filter: blur(10px);
+        box-shadow: 0 10px 30px rgba(0,0,0,.25);
+      }
+      .card h2 {
+        margin: 0 0 6px;
+        font-size: 16px;
+        font-weight: 650;
+      }
+      .card small {
+        color: var(--muted);
+        display: block;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-top: 8px;
+      }
+      canvas { width: 100% !important; height: 320px !important; }
+      .note {
+        color: var(--muted);
+        font-size: 13px;
+        margin-top: 6px;
+        line-height: 1.35;
+      }
+      .hint {
+        margin-top: 8px;
+        font-size: 12px;
+        color: rgba(229,231,235,.7);
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: rgba(255,255,255,.03);
+      }
+    </style>
+  </head>
+
+  <body>
+    <header>
+      <h1>TP3 — BI Dashboard</h1>
+      <p class="sub">
+        Visualização simples para explorar os resultados das consultas do projeto.
+        Escolhe um <span class="pill">documentId</span> e carrega os gráficos.
+      </p>
+    </header>
+
+    <div class="toolbar">
+      <input id="docId" class="input" type="number" min="1" value="1" placeholder="documentId" />
+      <input id="biBase" class="input" style="width: 320px" value="http://localhost:7000" placeholder="BI base URL" />
+
+      <select id="year" class="input" style="width: 140px">
+        <option value="">Ano (GDP)</option>
+        <option>2024</option>
+        <option>2023</option>
+        <option>2022</option>
+        <option>2021</option>
+      </select>
+
+      <button class="btn primary" id="loadAll">Carregar tudo</button>
+      <button class="btn" id="loadCurrency">Moedas</button>
+      <button class="btn" id="loadGdp">PIB</button>
+      <button class="btn" id="loadPop">População</button>
+
+      <div class="status" id="status">—</div>
+    </div>
+
+    <main>
+      <section class="card">
+        <h2>Moedas mais usadas</h2>
+        <small>Top moedas por número de países</small>
+        <div class="note">
+          Este gráfico mostra a distribuição de países por moeda (Top N).
+        </div>
+        <canvas id="chartCurrency"></canvas>
+        <div class="hint">Legenda: cada barra representa quantos países usam a moeda.</div>
+      </section>
+
+      <section class="card">
+        <h2>Top PIB</h2>
+        <small>Países com maior PIB (podes filtrar por ano)</small>
+        <div class="note">
+          Ordenado por PIB (descendente). O valor está em USD.
+        </div>
+        <canvas id="chartGdp"></canvas>
+        <div class="hint">Legenda: quanto maior a barra, maior o PIB.</div>
+      </section>
+
+      <section class="card span2">
+        <h2>População (intervalo)</h2>
+        <small>Filtra países por intervalo de população</small>
+
+        <div class="row">
+          <input id="minPop" class="input" type="number" min="0" value="50000000" />
+          <input id="maxPop" class="input" type="number" min="0" value="200000000" />
+          <button class="btn" id="applyPop">Aplicar</button>
+          <span class="note">Dica: usa <b>0</b> no máximo para “sem limite” (se o serviço suportar).</span>
+        </div>
+
+        <canvas id="chartPop"></canvas>
+        <div class="hint">Legenda: linha com a população por país (valores no eixo Y).</div>
+      </section>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const statusEl = $("status");
+
+      function setStatus(msg) {
+        statusEl.textContent = msg;
+      }
+
+      async function fetchJson(url) {
+        const r = await fetch(url);
+        if (!r.ok) {
+          const t = await r.text();
+          throw new Error(`HTTP ${r.status}: ${t}`);
+        }
+        return await r.json();
+      }
+
+      function fmtInt(n) {
+        return Number(n || 0).toLocaleString("pt-PT");
+      }
+
+      function fmtMoney(n) {
+        return Number(n || 0).toLocaleString("pt-PT");
+      }
+
+      let currencyChart = null;
+      let gdpChart = null;
+      let popChart = null;
+
+      function renderCurrency(items) {
+        const labels = items.map((x) => x.currency);
+        const data = items.map((x) => x.count);
+
+        const ctx = $("chartCurrency").getContext("2d");
+        if (currencyChart) currencyChart.destroy();
+
+        currencyChart = new Chart(ctx, {
+          type: "bar",
+          data: {
+            labels,
+            datasets: [{ label: "Nº de países", data }]
+          },
+          options: {
+            responsive: true,
+            plugins: {
+              legend: { display: true },
+              tooltip: {
+                callbacks: {
+                  label: (ctx) => ` ${ctx.dataset.label}: ${fmtInt(ctx.parsed.y)}`
+                }
+              }
+            },
+            scales: {
+              y: { beginAtZero: true, ticks: { callback: (v) => fmtInt(v) } }
+            }
+          }
+        });
+      }
+
+      function renderGdp(items, year) {
+        const labels = items.map((x) => x.name);
+        const data = items.map((x) => x.gdp);
+
+        const ctx = $("chartGdp").getContext("2d");
+        if (gdpChart) gdpChart.destroy();
+
+        const label = year ? `PIB (USD) — ${year}` : "PIB (USD)";
+
+        gdpChart = new Chart(ctx, {
+          type: "bar",
+          data: {
+            labels,
+            datasets: [{ label, data }]
+          },
+          options: {
+            responsive: true,
+            plugins: {
+              legend: { display: true },
+              tooltip: {
+                callbacks: {
+                  label: (ctx) => ` ${ctx.dataset.label}: ${fmtMoney(ctx.parsed.y)}`
+                }
+              }
+            },
+            scales: {
+              y: {
+                beginAtZero: true,
+                ticks: { callback: (v) => fmtMoney(v) }
+              }
+            }
+          }
+        });
+      }
+
+      function renderPop(items) {
+        const labels = items.map((x) => x.name);
+        const data = items.map((x) => x.population);
+
+        const ctx = $("chartPop").getContext("2d");
+        if (popChart) popChart.destroy();
+
+        popChart = new Chart(ctx, {
+          type: "line",
+          data: {
+            labels,
+            datasets: [{ label: "População", data }]
+          },
+          options: {
+            responsive: true,
+            plugins: {
+              legend: { display: true },
+              tooltip: {
+                callbacks: {
+                  label: (ctx) => ` ${ctx.dataset.label}: ${fmtInt(ctx.parsed.y)}`
+                }
+              }
+            },
+            scales: {
+              y: {
+                beginAtZero: true,
+                ticks: { callback: (v) => fmtInt(v) }
+              }
+            }
+          }
+        });
+      }
+
+      function getBase() {
+        return $("biBase").value.replace(/\/+$/, "");
+      }
+      function getDocId() {
+        return Number($("docId").value || 1);
+      }
+
+      async function loadCurrency() {
+        const base = getBase();
+        const docId = getDocId();
+        const limit = 10;
+
+        setStatus("A carregar moedas...");
+        const url = `${base}/bi/currency-stats?documentId=${docId}&limit=${limit}`;
+        const json = await fetchJson(url);
+        renderCurrency(json.items || []);
+        setStatus("Moedas carregadas");
+      }
+
+      async function loadGdp() {
+        const base = getBase();
+        const docId = getDocId();
+        const limit = 10;
+        const year = $("year").value || "";
+
+        setStatus("A carregar PIB...");
+        const url = `${base}/bi/top-gdp?documentId=${docId}&year=${encodeURIComponent(year)}&limit=${limit}`;
+        const json = await fetchJson(url);
+        renderGdp(json.items || [], year);
+        setStatus("PIB carregado");
+      }
+
+      async function loadPop() {
+        const base = getBase();
+        const docId = getDocId();
+        const limit = 20;
+        const minPop = Number($("minPop").value || 0);
+        const maxPop = Number($("maxPop").value || 0);
+
+        setStatus("A carregar população...");
+        const url = `${base}/bi/population-filter?documentId=${docId}&minPopulation=${minPop}&maxPopulation=${maxPop}&limit=${limit}`;
+        const json = await fetchJson(url);
+        renderPop(json.items || []);
+        setStatus("População carregada");
+      }
+
+      async function loadAll() {
+        try {
+          await loadCurrency();
+          await loadGdp();
+          await loadPop();
+          setStatus("Tudo carregado");
+        } catch (e) {
+          console.error(e);
+          setStatus(`Erro ao carregar dados`);
+          alert(e.message);
+        }
+      }
+
+      $("loadCurrency").addEventListener("click", () => loadCurrency().catch((e) => alert(e.message)));
+      $("loadGdp").addEventListener("click", () => loadGdp().catch((e) => alert(e.message)));
+      $("loadPop").addEventListener("click", () => loadPop().catch((e) => alert(e.message)));
+      $("applyPop").addEventListener("click", () => loadPop().catch((e) => alert(e.message)));
+      $("loadAll").addEventListener("click", () => loadAll());
+
+      loadAll();
+    </script>
+  </body>
+</html>
