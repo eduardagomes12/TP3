@@ -9,6 +9,8 @@ from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from xmlrpc.server import SimpleXMLRPCServer, SimpleXMLRPCRequestHandler
 
+from app.grpc_server import serve_grpc
+
 from app.xml_builder import build_population_report_xml, validate_xml_with_xsd
 
 app = FastAPI(title="TP3 XML Service", version="1.0")
@@ -173,6 +175,11 @@ def start_xmlrpc_server():
 
 @app.on_event("startup")
 async def on_startup():
+    print("[XML-SERVICE] Startup: a iniciar XML-RPC e gRPC...")
+
     t = threading.Thread(target=start_xmlrpc_server, daemon=True)
     t.start()
+
+    tg = threading.Thread(target=serve_grpc, daemon=True)
+    tg.start()
 
