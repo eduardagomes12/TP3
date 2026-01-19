@@ -1,0 +1,8 @@
+services:
+  bi-service:
+    build: .
+    container_name: tp3_bi_service
+    env_file:
+      - .env
+    ports:
+      - "7000:7000"
