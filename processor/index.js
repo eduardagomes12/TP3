@@ -207,8 +207,7 @@ async function enrichWithApis(record) {
   const currencyCode = countryData.currencies ? Object.keys(countryData.currencies)[0] : null;
 
   // API 2: World Bank (ISO3)
-  // Aqui nao queremos rebentar tudo se o WB falhar (ECONNABORTED / rate limit / etc)
-  // Entao: se falhar -> gdp fica null e registamos erro fora (no caller)
+  // se falhar -> gdp fica null e registamos erro fora (no caller)
   let gdpUsd = null;
   let gdpYear = null;
   let worldBankError = null;
