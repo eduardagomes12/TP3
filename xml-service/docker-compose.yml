@@ -6,3 +6,7 @@ services:
       - .env
     ports:
       - "8080:8080"
+      - "9090:9090"
+    environment:
+      - XMLRPC_PORT=9090
+
