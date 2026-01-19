@@ -7,6 +7,8 @@ import { Readable } from "stream";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import xmlrpc from "xmlrpc";
+
 
 // ---------------- CONFIG ----------------
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -16,12 +18,13 @@ const BUCKET = process.env.SUPABASE_BUCKET || "market-csv";
 const INTERVAL_SECONDS = Number(process.env.PROCESSOR_INTERVAL_SECONDS || 60);
 const WEBHOOK_PORT = Number(process.env.PORT || process.env.WEBHOOK_PORT || 7070);
 
-// URL "publica" que o XML Service vai chamar (pode ser ngrok, localhost em demo, etc.)
+// URL "publica" que o XML Service vai chamar
 const WEBHOOK_PUBLIC_URL =
   process.env.WEBHOOK_PUBLIC_URL || `http://localhost:${WEBHOOK_PORT}`;
 
-// Endpoint do XML Service para receber o multipart/form-data
-const XML_SERVICE_URL = process.env.XML_SERVICE_URL || ""; // ex: http://localhost:8080/xml
+//endpoint do xmlrpc
+const XMLRPC_URL = process.env.XMLRPC_URL || ""; 
+
 
 // tempo maximo para esperar callback do XML Service
 const WEBHOOK_WAIT_SECONDS = Number(process.env.WEBHOOK_WAIT_SECONDS || 60);
@@ -36,7 +39,8 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
+
 
 // ---------------- AXIOS CONFIG ----------------
 const AXIOS_CONFIG = {
@@ -270,47 +274,49 @@ async function enrichWithApis(record) {
 
 // ---------------- XML SERVICE SEND ----------------
 async function sendToXmlService({ requestId, mapperVersion, webhookUrl, csvPath }) {
-  if (!XML_SERVICE_URL) {
-    console.log("XML_SERVICE_URL nao definido. A saltar envio para XML Service.");
+  if (!XMLRPC_URL) {
+    console.log("XMLRPC_URL nao definido. A saltar envio para XML Service.");
     return { skipped: true };
   }
 
-  // Node 18+ tem fetch + FormData + Blob globalmente
-  const fileBytes = fs.readFileSync(csvPath);
-  const form = new FormData();
+  // enviar o ficheiro como base64 (RPC não “manda ficheiros” nativamente)
+  const csvBase64 = fs.readFileSync(csvPath).toString("base64");
 
-  form.append("requestId", requestId);
-  form.append("mapper_version", mapperVersion);
-  form.append("webhookUrl", webhookUrl);
+  const client = xmlrpc.createClient({ url: XMLRPC_URL });
 
-  // Nome do ficheiro no multipart
-  const filename = path.basename(csvPath);
-  form.append("file", new Blob([fileBytes], { type: "text/csv" }), filename);
-
-  const res = await fetch(XML_SERVICE_URL, {
-    method: "POST",
-    body: form,
+  return await new Promise((resolve, reject) => {
+    client.methodCall(
+      "xml.ingestCsv",
+      [
+        {
+          requestId,
+          webhookUrl,
+          mapper_version: mapperVersion,
+          filename: path.basename(csvPath),
+          csv_base64: csvBase64,
+        },
+      ],
+      (err, value) => {
+        if (err) return reject(err);
+        resolve(value);
+      }
+    );
   });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`XML Service respondeu ${res.status}: ${text || "sem body"}`);
-  }
-
-  const json = await res.json().catch(() => ({}));
-  return json;
 }
+
 // ------------------------------------------
 
 // ---------------- PIPELINE ----------------
 async function runOnce() {
+
   console.log("Processor: a listar CSVs...");
   const files = await listCsvFiles();
 
   if (files.length === 0) {
     console.log("Processor: nenhum CSV encontrado.");
-    return;
+    return false;
   }
+
 
   const target = files[0]; // tipo: incoming/countries_population_....csv
   const requestId = crypto.randomUUID();
@@ -416,9 +422,10 @@ async function runOnce() {
   });
 
   if (sendRes?.skipped) {
-    console.log("Processor: envio para XML Service ignorado (sem XML_SERVICE_URL).");
+    console.log("Processor: envio para XML Service ignorado (sem XMLRPC_URL).");
+
     console.log("Processor: nao vou apagar o CSV do bucket (para nao perder dados).");
-    return;
+    return true;
   }
 
   console.log("Processor: enviado. A aguardar confirmacao no webhook...");
@@ -430,23 +437,30 @@ async function runOnce() {
     console.log(
       `Processor: timeout a esperar webhook (${WEBHOOK_WAIT_SECONDS}s). Nao vou apagar o CSV do bucket.`
     );
-    return;
+    return true;
   }
 
   if (!ack.ok) {
     console.log("Processor: webhook recebido mas com ok=false. Nao vou apagar CSV do bucket.");
-    return;
+    return true;
   }
 
-  console.log("Processor: webhook ok. A apagar CSV original do bucket...");
+  console.log("Processor: webhook ok. A apagar CSVs do bucket (original + enriched)...");
 
-  // 3) apagar CSV original (incoming) do bucket quando OK
+
+    // 3) apagar CSV original (incoming) do bucket quando OK
   await deleteCsvFromBucket(target);
-  console.log("Processor: CSV apagado do bucket:", target);
+  console.log("Processor: CSV original apagado do bucket:", target);
 
-  // ---- limpeza local
-  try { fs.unlinkSync(outPath); } catch {}
-  try { fs.unlinkSync(errorsRunFile); } catch {}
+  // 4) apagar o enriched do bucket também (processed)
+  await deleteCsvFromBucket(processedBucketPath);
+  console.log("Processor: CSV enriched apagado do bucket:", processedBucketPath);
+
+  // ---- local (prova): NÃO apagar
+  console.log("Processor: a manter ficheiros locais para prova:", outPath, errorsRunFile);
+
+  return true;
+
 }
 
 // ------------------------------------------
@@ -454,17 +468,28 @@ async function runOnce() {
 // ---------------- MAIN LOOP ----------------
 async function mainLoop() {
   console.log("Processor a correr...");
+
   while (true) {
     try {
-      await runOnce();
+      let didWork = false;
+
+      while (true) {
+        const worked = await runOnce();
+        if (!worked) break; // fila vazia
+        didWork = true;
+      }
+
+      if (!didWork) {
+        console.log(`Processor: a aguardar ${INTERVAL_SECONDS} segundos...\n`);
+        await sleep(INTERVAL_SECONDS * 1000);
+      }
     } catch (e) {
       console.error("Processor erro:", e?.message || e);
+      await sleep(INTERVAL_SECONDS * 1000);
     }
-
-    console.log(`Processor: a aguardar ${INTERVAL_SECONDS} segundos...\n`);
-    await sleep(INTERVAL_SECONDS * 1000);
   }
 }
+
 // ------------------------------------------
 
 // ---------------- START ----------------
