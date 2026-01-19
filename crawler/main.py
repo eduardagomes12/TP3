@@ -98,8 +98,12 @@ def upload_to_supabase(csv_bytes: bytes, filename: str):
     supabase.storage.from_(BUCKET).upload(
         path=filename,
         file=csv_bytes,
-        file_options={"content-type": "text/csv", "upsert": True}
+        file_options={
+            "content-type": "text/csv",
+            "upsert": "true"   
+        }
     )
+
 
 
 
