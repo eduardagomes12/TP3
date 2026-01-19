@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package xmlservice;
+
+service XmlQueryService {
+  rpc TopGdp(TopGdpRequest) returns (TopGdpResponse);
+  rpc CountriesByCurrency(CurrencyStatsRequest) returns (CurrencyStatsResponse);
+  rpc PopulationFilter(PopulationFilterRequest) returns (PopulationFilterResponse);
+}
+
+message TopGdpRequest {
+  int64 documentId = 1;
+  string year = 2;      // "" = qualquer
+  int32 limit = 3;      // ex: 10
+}
+
+message TopGdpItem {
+  string name = 1;
+  string iso2 = 2;
+  string iso3 = 3;
+  string year = 4;
+  double gdp = 5;
+}
+
+message TopGdpResponse {
+  repeated TopGdpItem items = 1;
+}
+
+message CurrencyStatsRequest {
+  int64 documentId = 1;
+  int32 limit = 2; // ex: 10
+}
+
+message CurrencyStat {
+  string currency = 1;
+  int32 count = 2;
+}
+
+message CurrencyStatsResponse {
+  repeated CurrencyStat items = 1;
+}
+
+message PopulationFilterRequest {
+  int64 documentId = 1;
+  int64 minPopulation = 2;
+  int64 maxPopulation = 3;
+  int32 limit = 4; // ex: 20
+}
+
+message PopulationItem {
+  string name = 1;
+  int64 population = 2;
+  double worldPct = 3;
+}
+
+message PopulationFilterResponse {
+  repeated PopulationItem items = 1;
+}

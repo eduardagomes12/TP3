@@ -7,6 +7,8 @@ import { Readable } from "stream";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import xmlrpc from "xmlrpc";
+
 
 // ---------------- CONFIG ----------------
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -16,12 +18,13 @@ const BUCKET = process.env.SUPABASE_BUCKET || "market-csv";
 const INTERVAL_SECONDS = Number(process.env.PROCESSOR_INTERVAL_SECONDS || 60);
 const WEBHOOK_PORT = Number(process.env.PORT || process.env.WEBHOOK_PORT || 7070);
 
-// URL "publica" que o XML Service vai chamar (pode ser ngrok, localhost em demo, etc.)
+// URL "publica" que o XML Service vai chamar
 const WEBHOOK_PUBLIC_URL =
   process.env.WEBHOOK_PUBLIC_URL || `http://localhost:${WEBHOOK_PORT}`;
 
-// Endpoint do XML Service para receber o multipart/form-data
-const XML_SERVICE_URL = process.env.XML_SERVICE_URL || ""; // ex: http://localhost:8080/xml
+//endpoint do xmlrpc
+const XMLRPC_URL = process.env.XMLRPC_URL || ""; 
+
 
 // tempo maximo para esperar callback do XML Service
 const WEBHOOK_WAIT_SECONDS = Number(process.env.WEBHOOK_WAIT_SECONDS || 60);
@@ -36,7 +39,8 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
+
 
 // ---------------- AXIOS CONFIG ----------------
 const AXIOS_CONFIG = {
@@ -54,29 +58,27 @@ const PROJECT_ROOT = process.cwd();
 const ERRORS_DIR = path.join(PROJECT_ROOT, "errors");
 const OUTPUT_DIR = path.join(PROJECT_ROOT, "output");
 
-const ERRORS_FILE = path.join(ERRORS_DIR, "processing_errors.csv");
 
 if (!fs.existsSync(ERRORS_DIR)) fs.mkdirSync(ERRORS_DIR, { recursive: true });
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
-if (!fs.existsSync(ERRORS_FILE)) {
-  fs.writeFileSync(ERRORS_FILE, "timestamp,source_file,request_id,country,error\n", "utf8");
-}
+
 
 function csvEscape(value) {
   const s = String(value ?? "");
   return `"${s.replace(/"/g, '""')}"`;
 }
 
-function logError(sourceFile, requestId, country, errorMsg) {
+function logError(errorsFile, sourceFile, requestId, country, errorMsg) {
   const line =
     `${csvEscape(new Date().toISOString())},` +
     `${csvEscape(sourceFile)},` +
     `${csvEscape(requestId)},` +
     `${csvEscape(country)},` +
     `${csvEscape(errorMsg)}\n`;
-  fs.appendFileSync(ERRORS_FILE, line, "utf8");
+  fs.appendFileSync(errorsFile, line, "utf8");
 }
+
 
 function tsCompact() {
   const d = new Date();
@@ -145,32 +147,53 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+
+const INCOMING_PREFIX = "incoming"; // onde o crawler mete os CSVs
+
 async function listCsvFiles() {
-  const { data, error } = await supabase.storage.from(BUCKET).list("", {
+  const { data, error } = await supabase.storage.from(BUCKET).list(INCOMING_PREFIX, {
     limit: 100,
     offset: 0,
     sortBy: { column: "name", order: "asc" }, // FIFO
   });
-
   if (error) throw error;
 
   return (data || [])
-    .map((f) => f.name)
-    .filter((name) => name.endsWith(".csv") && name.startsWith("countries_population_"))
+    .map((f) => `${INCOMING_PREFIX}/${f.name}`)
+    .filter((fullPath) => fullPath.endsWith(".csv") && path.basename(fullPath).startsWith("countries_population_"))
     .sort();
 }
 
-async function downloadCsvStream(filename) {
-  const { data, error } = await supabase.storage.from(BUCKET).download(filename);
+async function downloadCsvStream(filePath) {
+  const { data, error } = await supabase.storage.from(BUCKET).download(filePath);
   if (error) throw error;
   return Readable.fromWeb(data.stream());
 }
 
-async function deleteCsvFromBucket(filename) {
-  const { data, error } = await supabase.storage.from(BUCKET).remove([filename]);
+async function deleteCsvFromBucket(filePath) {
+  const { data, error } = await supabase.storage.from(BUCKET).remove([filePath]);
   if (error) throw error;
   return data;
 }
+
+
+
+
+async function uploadBufferToBucket(bucketPath, buffer, contentType) {
+  const { error } = await supabase.storage.from(BUCKET).upload(bucketPath, buffer, {
+    contentType,
+    upsert: true, // importante: permite reescrever ficheiros
+  });
+  if (error) throw error;
+}
+
+async function uploadFileToBucket(localPath, bucketPath, contentType) {
+  const buffer = fs.readFileSync(localPath);
+  await uploadBufferToBucket(bucketPath, buffer, contentType);
+}
+
+
+
 // ----------------------------------------
 
 // ---------------- ENRICHMENT ----------------
@@ -250,50 +273,65 @@ async function enrichWithApis(record) {
 
 // ---------------- XML SERVICE SEND ----------------
 async function sendToXmlService({ requestId, mapperVersion, webhookUrl, csvPath }) {
-  if (!XML_SERVICE_URL) {
-    console.log("XML_SERVICE_URL nao definido. A saltar envio para XML Service.");
+  if (!XMLRPC_URL) {
+    console.log("XMLRPC_URL nao definido. A saltar envio para XML Service.");
     return { skipped: true };
   }
 
-  // Node 18+ tem fetch + FormData + Blob globalmente
-  const fileBytes = fs.readFileSync(csvPath);
-  const form = new FormData();
+  // enviar o ficheiro como base64 (RPC não “manda ficheiros” nativamente)
+  const csvBase64 = fs.readFileSync(csvPath).toString("base64");
 
-  form.append("requestId", requestId);
-  form.append("mapper_version", mapperVersion);
-  form.append("webhookUrl", webhookUrl);
+  const u = new URL(XMLRPC_URL);
 
-  // Nome do ficheiro no multipart
-  const filename = path.basename(csvPath);
-  form.append("file", new Blob([fileBytes], { type: "text/csv" }), filename);
+  const client =
+    u.protocol === "https:"
+      ? xmlrpc.createSecureClient({
+          host: u.hostname,
+          port: u.port ? Number(u.port) : 443,
+          path: u.pathname || "/rpc",
+        })
+      : xmlrpc.createClient({
+          host: u.hostname,
+          port: u.port ? Number(u.port) : 80,
+          path: u.pathname || "/rpc",
+        });
 
-  const res = await fetch(XML_SERVICE_URL, {
-    method: "POST",
-    body: form,
+
+  return await new Promise((resolve, reject) => {
+    client.methodCall(
+      "xml.ingestCsv",
+      [
+        {
+          requestId,
+          webhookUrl,
+          mapper_version: mapperVersion,
+          filename: path.basename(csvPath),
+          csv_base64: csvBase64,
+        },
+      ],
+      (err, value) => {
+        if (err) return reject(err);
+        resolve(value);
+      }
+    );
   });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`XML Service respondeu ${res.status}: ${text || "sem body"}`);
-  }
-
-  const json = await res.json().catch(() => ({}));
-  return json;
 }
+
 // ------------------------------------------
 
 // ---------------- PIPELINE ----------------
 async function runOnce() {
+
   console.log("Processor: a listar CSVs...");
   const files = await listCsvFiles();
 
   if (files.length === 0) {
     console.log("Processor: nenhum CSV encontrado.");
-    return;
+    return false;
   }
 
-  // FIFO: o mais antigo
-  const target = files[0];
+
+  const target = files[0]; // tipo: incoming/countries_population_....csv
   const requestId = crypto.randomUUID();
 
   console.log("Processor: a processar (FIFO):", target);
@@ -308,9 +346,13 @@ async function runOnce() {
     })
   );
 
-  // output csv enriched
-  const outName = `enriched_${tsCompact()}_${target}`;
+  // ---- ficheiros locais desta run
+  const baseTarget = path.basename(target); // evita slashes no nome
+  const outName = `enriched_${tsCompact()}_${baseTarget}`;
   const outPath = path.join(OUTPUT_DIR, outName);
+
+  const errorsRunFile = path.join(ERRORS_DIR, `processing_errors_${requestId}.csv`);
+  fs.writeFileSync(errorsRunFile, "timestamp,source_file,request_id,country,error\n", "utf8");
 
   const out = fs.createWriteStream(outPath, { encoding: "utf8" });
   out.write(
@@ -329,6 +371,7 @@ async function runOnce() {
       if (!enriched) {
         failCount++;
         logError(
+          errorsRunFile,
           target,
           requestId,
           rawCountry,
@@ -337,9 +380,8 @@ async function runOnce() {
         continue;
       }
 
-      // Se World Bank falhou, registamos o erro, mas mantemos a linha com gdp null
       if (enriched.worldBankError) {
-        logError(target, requestId, rawCountry, enriched.worldBankError);
+        logError(errorsRunFile, target, requestId, rawCountry, enriched.worldBankError);
       }
 
       okCount++;
@@ -363,16 +405,25 @@ async function runOnce() {
       }
     } catch (err) {
       failCount++;
-      logError(target, requestId, rawCountry, err.message || "Erro inesperado");
+      logError(errorsRunFile, target, requestId, rawCountry, err?.message || "Erro inesperado");
     }
   }
 
-  out.end();
+  await new Promise((resolve) => out.end(resolve));
 
   console.log(`Processor: enrichment concluido (${okCount} ok, ${failCount} falhas).`);
   console.log(`Processor: CSV enriched guardado em: ${outPath}`);
 
-  // 1) enviar para XML Service (multipart) com metadata (requestId, mapper, webhookUrl)
+  // ---- Uploads para o bucket (pastas virtuais)
+  const processedBucketPath = `processed/${outName}`;
+  await uploadFileToBucket(outPath, processedBucketPath, "text/csv");
+  console.log("Processor: enriched enviado para o bucket:", processedBucketPath);
+
+  const errorsBucketPath = `errors/processing_errors_${requestId}.csv`;
+  await uploadFileToBucket(errorsRunFile, errorsBucketPath, "text/csv");
+  console.log("Processor: erros enviados para o bucket:", errorsBucketPath);
+
+  // 1) enviar para XML Service
   const webhookUrl = `${WEBHOOK_PUBLIC_URL}/webhook/xml-service`;
 
   console.log("Processor: a enviar para XML Service...");
@@ -384,9 +435,10 @@ async function runOnce() {
   });
 
   if (sendRes?.skipped) {
-    console.log("Processor: envio para XML Service ignorado (sem XML_SERVICE_URL).");
+    console.log("Processor: envio para XML Service ignorado (sem XMLRPC_URL).");
+
     console.log("Processor: nao vou apagar o CSV do bucket (para nao perder dados).");
-    return;
+    return true;
   }
 
   console.log("Processor: enviado. A aguardar confirmacao no webhook...");
@@ -398,39 +450,59 @@ async function runOnce() {
     console.log(
       `Processor: timeout a esperar webhook (${WEBHOOK_WAIT_SECONDS}s). Nao vou apagar o CSV do bucket.`
     );
-    return;
+    return true;
   }
 
   if (!ack.ok) {
     console.log("Processor: webhook recebido mas com ok=false. Nao vou apagar CSV do bucket.");
-    return;
+    return true;
   }
 
-  console.log("Processor: webhook ok. A apagar CSV original do bucket...");
+  console.log("Processor: webhook ok. A apagar CSVs do bucket (original + enriched)...");
 
-  // 3) apagar CSV original do bucket quando OK
+
+    // 3) apagar CSV original (incoming) do bucket quando OK
   await deleteCsvFromBucket(target);
-  console.log("Processor: CSV apagado do bucket:", target);
+  console.log("Processor: CSV original apagado do bucket:", target);
 
-  // opcional: podias tambem apagar o enriched local se quiseres
-  // fs.unlinkSync(outPath);
+  // 4) apagar o enriched do bucket também (processed)
+  await deleteCsvFromBucket(processedBucketPath);
+  console.log("Processor: CSV enriched apagado do bucket:", processedBucketPath);
+
+  // ---- local (prova): NÃO apagar
+  console.log("Processor: a manter ficheiros locais para prova:", outPath, errorsRunFile);
+
+  return true;
+
 }
+
 // ------------------------------------------
 
 // ---------------- MAIN LOOP ----------------
 async function mainLoop() {
   console.log("Processor a correr...");
+
   while (true) {
     try {
-      await runOnce();
+      let didWork = false;
+
+      while (true) {
+        const worked = await runOnce();
+        if (!worked) break; // fila vazia
+        didWork = true;
+      }
+
+      if (!didWork) {
+        console.log(`Processor: a aguardar ${INTERVAL_SECONDS} segundos...\n`);
+        await sleep(INTERVAL_SECONDS * 1000);
+      }
     } catch (e) {
       console.error("Processor erro:", e?.message || e);
+      await sleep(INTERVAL_SECONDS * 1000);
     }
-
-    console.log(`Processor: a aguardar ${INTERVAL_SECONDS} segundos...\n`);
-    await sleep(INTERVAL_SECONDS * 1000);
   }
 }
+
 // ------------------------------------------
 
 // ---------------- START ----------------
