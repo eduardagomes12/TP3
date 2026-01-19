@@ -39,7 +39,7 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const app = express();
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "10mb" }));
 
 
 // ---------------- AXIOS CONFIG ----------------
@@ -282,7 +282,21 @@ async function sendToXmlService({ requestId, mapperVersion, webhookUrl, csvPath 
   // enviar o ficheiro como base64 (RPC não “manda ficheiros” nativamente)
   const csvBase64 = fs.readFileSync(csvPath).toString("base64");
 
-  const client = xmlrpc.createClient({ url: XMLRPC_URL });
+  const u = new URL(XMLRPC_URL);
+
+  const client =
+    u.protocol === "https:"
+      ? xmlrpc.createSecureClient({
+          host: u.hostname,
+          port: u.port ? Number(u.port) : 443,
+          path: u.pathname || "/rpc",
+        })
+      : xmlrpc.createClient({
+          host: u.hostname,
+          port: u.port ? Number(u.port) : 80,
+          path: u.pathname || "/rpc",
+        });
+
 
   return await new Promise((resolve, reject) => {
     client.methodCall(
