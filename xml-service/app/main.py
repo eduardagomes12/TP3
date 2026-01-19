@@ -167,6 +167,7 @@ def start_xmlrpc_server():
     server.register_function(ingestCsv, "xml.ingestCsv")
 
     print(f"[XML-SERVICE] XML-RPC a ouvir em http://{XMLRPC_HOST}:{XMLRPC_PORT}/rpc")
+    server.register_introspection_functions()
     server.serve_forever()
 
 
