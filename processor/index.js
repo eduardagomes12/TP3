@@ -54,29 +54,27 @@ const PROJECT_ROOT = process.cwd();
 const ERRORS_DIR = path.join(PROJECT_ROOT, "errors");
 const OUTPUT_DIR = path.join(PROJECT_ROOT, "output");
 
-const ERRORS_FILE = path.join(ERRORS_DIR, "processing_errors.csv");
 
 if (!fs.existsSync(ERRORS_DIR)) fs.mkdirSync(ERRORS_DIR, { recursive: true });
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
-if (!fs.existsSync(ERRORS_FILE)) {
-  fs.writeFileSync(ERRORS_FILE, "timestamp,source_file,request_id,country,error\n", "utf8");
-}
+
 
 function csvEscape(value) {
   const s = String(value ?? "");
   return `"${s.replace(/"/g, '""')}"`;
 }
 
-function logError(sourceFile, requestId, country, errorMsg) {
+function logError(errorsFile, sourceFile, requestId, country, errorMsg) {
   const line =
     `${csvEscape(new Date().toISOString())},` +
     `${csvEscape(sourceFile)},` +
     `${csvEscape(requestId)},` +
     `${csvEscape(country)},` +
     `${csvEscape(errorMsg)}\n`;
-  fs.appendFileSync(ERRORS_FILE, line, "utf8");
+  fs.appendFileSync(errorsFile, line, "utf8");
 }
+
 
 function tsCompact() {
   const d = new Date();
@@ -145,32 +143,53 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+
+const INCOMING_PREFIX = "incoming"; // onde o crawler mete os CSVs
+
 async function listCsvFiles() {
-  const { data, error } = await supabase.storage.from(BUCKET).list("", {
+  const { data, error } = await supabase.storage.from(BUCKET).list(INCOMING_PREFIX, {
     limit: 100,
     offset: 0,
     sortBy: { column: "name", order: "asc" }, // FIFO
   });
-
   if (error) throw error;
 
   return (data || [])
-    .map((f) => f.name)
-    .filter((name) => name.endsWith(".csv") && name.startsWith("countries_population_"))
+    .map((f) => `${INCOMING_PREFIX}/${f.name}`)
+    .filter((fullPath) => fullPath.endsWith(".csv") && path.basename(fullPath).startsWith("countries_population_"))
     .sort();
 }
 
-async function downloadCsvStream(filename) {
-  const { data, error } = await supabase.storage.from(BUCKET).download(filename);
+async function downloadCsvStream(filePath) {
+  const { data, error } = await supabase.storage.from(BUCKET).download(filePath);
   if (error) throw error;
   return Readable.fromWeb(data.stream());
 }
 
-async function deleteCsvFromBucket(filename) {
-  const { data, error } = await supabase.storage.from(BUCKET).remove([filename]);
+async function deleteCsvFromBucket(filePath) {
+  const { data, error } = await supabase.storage.from(BUCKET).remove([filePath]);
   if (error) throw error;
   return data;
 }
+
+
+
+
+async function uploadBufferToBucket(bucketPath, buffer, contentType) {
+  const { error } = await supabase.storage.from(BUCKET).upload(bucketPath, buffer, {
+    contentType,
+    upsert: true, // importante: permite reescrever ficheiros
+  });
+  if (error) throw error;
+}
+
+async function uploadFileToBucket(localPath, bucketPath, contentType) {
+  const buffer = fs.readFileSync(localPath);
+  await uploadBufferToBucket(bucketPath, buffer, contentType);
+}
+
+
+
 // ----------------------------------------
 
 // ---------------- ENRICHMENT ----------------
@@ -293,8 +312,7 @@ async function runOnce() {
     return;
   }
 
-  // FIFO: o mais antigo
-  const target = files[0];
+  const target = files[0]; // tipo: incoming/countries_population_....csv
   const requestId = crypto.randomUUID();
 
   console.log("Processor: a processar (FIFO):", target);
@@ -309,9 +327,13 @@ async function runOnce() {
     })
   );
 
-  // output csv enriched
-  const outName = `enriched_${tsCompact()}_${target}`;
+  // ---- ficheiros locais desta run
+  const baseTarget = path.basename(target); // evita slashes no nome
+  const outName = `enriched_${tsCompact()}_${baseTarget}`;
   const outPath = path.join(OUTPUT_DIR, outName);
+
+  const errorsRunFile = path.join(ERRORS_DIR, `processing_errors_${requestId}.csv`);
+  fs.writeFileSync(errorsRunFile, "timestamp,source_file,request_id,country,error\n", "utf8");
 
   const out = fs.createWriteStream(outPath, { encoding: "utf8" });
   out.write(
@@ -330,6 +352,7 @@ async function runOnce() {
       if (!enriched) {
         failCount++;
         logError(
+          errorsRunFile,
           target,
           requestId,
           rawCountry,
@@ -338,9 +361,8 @@ async function runOnce() {
         continue;
       }
 
-      // Se World Bank falhou, registamos o erro, mas mantemos a linha com gdp null
       if (enriched.worldBankError) {
-        logError(target, requestId, rawCountry, enriched.worldBankError);
+        logError(errorsRunFile, target, requestId, rawCountry, enriched.worldBankError);
       }
 
       okCount++;
@@ -364,17 +386,25 @@ async function runOnce() {
       }
     } catch (err) {
       failCount++;
-      logError(target, requestId, rawCountry, err.message || "Erro inesperado");
+      logError(errorsRunFile, target, requestId, rawCountry, err?.message || "Erro inesperado");
     }
   }
 
   await new Promise((resolve) => out.end(resolve));
 
-
   console.log(`Processor: enrichment concluido (${okCount} ok, ${failCount} falhas).`);
   console.log(`Processor: CSV enriched guardado em: ${outPath}`);
 
-  // 1) enviar para XML Service (multipart) com metadata (requestId, mapper, webhookUrl)
+  // ---- Uploads para o bucket (pastas virtuais)
+  const processedBucketPath = `processed/${outName}`;
+  await uploadFileToBucket(outPath, processedBucketPath, "text/csv");
+  console.log("Processor: enriched enviado para o bucket:", processedBucketPath);
+
+  const errorsBucketPath = `errors/processing_errors_${requestId}.csv`;
+  await uploadFileToBucket(errorsRunFile, errorsBucketPath, "text/csv");
+  console.log("Processor: erros enviados para o bucket:", errorsBucketPath);
+
+  // 1) enviar para XML Service
   const webhookUrl = `${WEBHOOK_PUBLIC_URL}/webhook/xml-service`;
 
   console.log("Processor: a enviar para XML Service...");
@@ -410,19 +440,15 @@ async function runOnce() {
 
   console.log("Processor: webhook ok. A apagar CSV original do bucket...");
 
-  // 3) apagar CSV original do bucket quando OK
+  // 3) apagar CSV original (incoming) do bucket quando OK
   await deleteCsvFromBucket(target);
   console.log("Processor: CSV apagado do bucket:", target);
 
-  //  apagar o enriched local 
-  try {
-    fs.unlinkSync(outPath);
-    console.log("Processor: CSV enriched apagado localmente:", outPath);
-  } catch (e) {
-    console.log("Processor: nao consegui apagar enriched (ignorado):", e?.message || e);
-  }
-
+  // ---- limpeza local
+  try { fs.unlinkSync(outPath); } catch {}
+  try { fs.unlinkSync(errorsRunFile); } catch {}
 }
+
 // ------------------------------------------
 
 // ---------------- MAIN LOOP ----------------
